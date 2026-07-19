@@ -1,13 +1,12 @@
-using UnityEngine;
 using System.Collections;
+using UnityEngine;
 
-// Nesnenin ne tür bir etkileşime gireceğini belirliyoruz
 public enum InteractType
 {
     Door,
     Key,
     Puzzle,
-    Note // YENİ: Okunabilir notlar ve bilmeceler için
+    Note
 }
 
 public class Interactable : MonoBehaviour
@@ -15,79 +14,77 @@ public class Interactable : MonoBehaviour
     [Header("Interaction Settings")]
     public InteractType type;
     public string promptMessage = "Interact";
-    
+
     [Header("Note/Riddle Settings (For Notes)")]
     [TextArea(3, 10)]
-    public string noteContent = "Buraya korkunç bir bilmece yaz..."; // Bilmecenin yazılacağı metin kutusu
+    public string noteContent = "Buraya korkunc bir bilmece yaz...";
 
     [Header("Lock Settings (For Doors)")]
-    public bool isLocked = false;
-    public string requiredKeyId = ""; // Kapıyı açmak için gereken anahtar ID'si
+    public bool isLocked;
+    public string requiredKeyId = "";
 
     [Header("Key Settings (For Keys)")]
-    public string keyId = ""; // Bu anahtarın eşsiz ID'si
+    public string keyId = "";
 
     [Header("Door Rotation Settings")]
     public float openAngle = 90f;
     public float openSpeed = 2f;
-    
-    private bool _isOpen = false;
+
+    private bool _isOpen;
     private Quaternion _startRotation;
     private Quaternion _targetRotation;
+    private Coroutine _doorAnimation;
 
-    void Start()
+    private void Start()
     {
-        // Kapının açılma animasyonu için başlangıç ve hedef rotasyonlarını kaydet
         _startRotation = transform.localRotation;
-        _targetRotation = _startRotation * Quaternion.Euler(0, openAngle, 0);
+        _targetRotation = _startRotation * Quaternion.Euler(0f, openAngle, 0f);
     }
 
     public void Interact(InteractionSystem playerSystem)
     {
         if (type == InteractType.Key)
         {
-            // Anahtarı oyuncunun envanterine ekle ve sahneden yok et
             playerSystem.AddKey(keyId);
             Destroy(gameObject);
+            return;
         }
-        else if (type == InteractType.Note)
+
+        if (type == InteractType.Note)
         {
-            // YENİ: Oyuncu nota tıkladığında notu ekranda göster
             playerSystem.ShowNote(noteContent);
+            return;
         }
-        else if (type == InteractType.Door)
+
+        if (type != InteractType.Door)
+            return;
+
+        if (isLocked)
         {
-            if (isLocked)
-            {
-                // Oyuncunun doğru anahtara sahip olup olmadığını kontrol et
-                if (playerSystem.HasKey(requiredKeyId))
-                {
-                    isLocked = false;
-                    _isOpen = true;
-                    StartCoroutine(AnimateDoorOpen());
-                }
-            }
-            else
-            {
-                // Kilitli değilse ve kapalıysa doğrudan aç
-                if (!_isOpen)
-                {
-                    _isOpen = true;
-                    StartCoroutine(AnimateDoorOpen());
-                }
-            }
+            if (!playerSystem.HasKey(requiredKeyId))
+                return;
+
+            isLocked = false;
         }
+
+        _isOpen = !_isOpen;
+        if (_doorAnimation != null)
+            StopCoroutine(_doorAnimation);
+        _doorAnimation = StartCoroutine(AnimateDoor(_isOpen ? _targetRotation : _startRotation));
     }
 
-    // Kapıyı yumuşak bir şekilde (Slerp) döndürerek açan animasyon kodu
-    private IEnumerator AnimateDoorOpen()
+    private IEnumerator AnimateDoor(Quaternion destination)
     {
-        float progress = 0f;
+        var initialRotation = transform.localRotation;
+        var progress = 0f;
         while (progress < 1f)
         {
             progress += Time.deltaTime * openSpeed;
-            transform.localRotation = Quaternion.Slerp(_startRotation, _targetRotation, progress);
+            transform.localRotation = Quaternion.Slerp(initialRotation, destination, progress);
             yield return null;
         }
+
+        transform.localRotation = destination;
+        _doorAnimation = null;
     }
 }

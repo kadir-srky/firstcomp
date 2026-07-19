@@ -44,23 +44,31 @@ public class InteractionSystem : MonoBehaviour
     void CheckForInteractables()
     {
         Ray ray = new Ray(playerCamera.position, playerCamera.forward);
-        RaycastHit hit;
+        RaycastHit[] hits = Physics.SphereCastAll(ray, interactionRadius, interactionDistance);
+        Interactable closestInteractable = null;
+        float closestDistance = float.MaxValue;
 
-        if (Physics.SphereCast(ray, interactionRadius, out hit, interactionDistance))
+        // A door frame has its own collider and often sits in front of the
+        // door collider.  Check every hit so the frame cannot hide the door
+        // interaction behind it.
+        foreach (RaycastHit hit in hits)
         {
             Interactable interactable = hit.collider.GetComponentInParent<Interactable>();
-
-            if (interactable != null)
+            if (interactable != null && hit.distance < closestDistance)
             {
-                _currentInteractable = interactable;
-                UpdateUI(interactable);
-
-                if (Input.GetKeyDown(KeyCode.E))
-                {
-                    interactable.Interact(this);
-                }
-                return; 
+                closestInteractable = interactable;
+                closestDistance = hit.distance;
             }
+        }
+
+        if (closestInteractable != null)
+        {
+            _currentInteractable = closestInteractable;
+            UpdateUI(closestInteractable);
+
+            if (Input.GetKeyDown(KeyCode.E))
+                closestInteractable.Interact(this);
+            return;
         }
 
         if (_currentInteractable != null)

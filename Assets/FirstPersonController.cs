@@ -11,6 +11,8 @@ public class FirstPersonController : MonoBehaviour
     public Transform playerCamera;
     public float mouseSensitivity = 2.0f;
     public float verticalLookLimit = 80.0f; // Limits vertical head tilt to prevent flipping over
+    [Tooltip("Prevents nearby walls from being clipped away by the camera.")]
+    [Range(0.01f, 0.2f)] public float cameraNearClipPlane = 0.03f;
 
     private CharacterController _characterController;
     private float _verticalRotation = 0f;
@@ -19,6 +21,10 @@ public class FirstPersonController : MonoBehaviour
     void Start()
     {
         _characterController = GetComponent<CharacterController>();
+
+        Camera sceneCamera = playerCamera != null ? playerCamera.GetComponent<Camera>() : null;
+        if (sceneCamera != null)
+            sceneCamera.nearClipPlane = cameraNearClipPlane;
 
         // Lock and hide the cursor for smooth first-person controls
         Cursor.lockState = CursorLockMode.Locked;
