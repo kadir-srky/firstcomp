@@ -410,6 +410,7 @@ public sealed class RandomCorridorGeneratorEditor : Editor
             interactable = Undo.AddComponent<Interactable>(hinge.gameObject);
         interactable.type = InteractType.Door;
         interactable.promptMessage = "Kapiyi Ac / Kapat";
+        interactable.openAwayFromInteractor = true;
         // The next wall overlaps the frame very slightly too, preventing a
         // hairline seam at either side of a doorway.
         return cursor + Mathf.Max(0.01f, frameBounds.size.z - generator.WallJoinOverlap);

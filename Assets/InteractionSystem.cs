@@ -21,6 +21,8 @@ public class InteractionSystem : MonoBehaviour
     private bool _isReadingNote = false; 
     private Interactable _currentInteractable; // HATA BURADAN KAYNAKLANIYORDU, EKLENDİ!
 
+    public Vector3 InteractionPosition => playerCamera != null ? playerCamera.position : transform.position;
+
     void Start()
     {
         if (interactionText != null) interactionText.text = "";
