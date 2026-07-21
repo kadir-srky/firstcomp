@@ -1,5 +1,6 @@
 using System;
 using System.Linq;
+using System.Collections.Generic;
 using UnityEditor;
 using UnityEngine;
 
@@ -9,6 +10,8 @@ public sealed class RandomCorridorGeneratorEditor : Editor
     private const string WallsPath = "Assets/3d_ai_assets/walls";
     private const string DoorsPath = "Assets/3d_ai_assets/doors";
     private const string FloorsPath = "Assets/3d_ai_assets/floors";
+    private const string CeilingsPath = "Assets/3d_ai_assets/ceiling";
+    private const string CeilingLightPath = "Assets/3d_ai_assets/lights/light4/light04.obj";
     private const string ExcludedFloorPath = "Assets/3d_ai_assets/floors/floor1/floor01.obj";
     private const string DoorFramePath = "Assets/3d_ai_assets/doors/doorframe1/doorframe01.obj";
 
@@ -32,7 +35,7 @@ public sealed class RandomCorridorGeneratorEditor : Editor
         var generator = (RandomCorridorGenerator)target;
         EditorGUILayout.Space();
 
-        if (GUILayout.Button("Projeden Duvar ve Kapilari Yukle"))
+        if (GUILayout.Button("Projeden Koridor Assetlerini Yukle"))
         {
             Undo.RecordObject(generator, "Assign corridor assets");
             AssignProjectAssets(generator);
@@ -46,7 +49,7 @@ public sealed class RandomCorridorGeneratorEditor : Editor
         }
 
         if (!CanGenerate(generator))
-            EditorGUILayout.HelpBox("Duvarlar, zeminler, doorframe01 ve en az bir kapi atanmalidir.", MessageType.Warning);
+            EditorGUILayout.HelpBox("Duvarlar, zeminler, tavanlar, light04, doorframe01 ve en az bir kapi atanmalidir.", MessageType.Warning);
 
         if (GUILayout.Button("Olusturulan Koridoru Sil"))
             Clear(generator);
@@ -61,6 +64,18 @@ public sealed class RandomCorridorGeneratorEditor : Editor
         generator.DoorFramePrefab = AssetDatabase.LoadAssetAtPath<GameObject>(DoorFramePath);
         generator.FloorPrefabs = FindModels(FloorsPath)
             .Where(floor => !IsExcludedFloor(floor))
+            .ToArray();
+        generator.CeilingPrefabs = FindPrefabs(CeilingsPath);
+        generator.CeilingLightPrefab = AssetDatabase.LoadAssetAtPath<GameObject>(CeilingLightPath);
+    }
+
+    private static GameObject[] FindPrefabs(string folder)
+    {
+        return AssetDatabase.FindAssets("t:Prefab", new[] { folder })
+            .Select(AssetDatabase.GUIDToAssetPath)
+            .Select(path => AssetDatabase.LoadAssetAtPath<GameObject>(path))
+            .Where(asset => asset != null)
+            .OrderBy(asset => AssetDatabase.GetAssetPath(asset), StringComparer.Ordinal)
             .ToArray();
     }
 
@@ -79,6 +94,8 @@ public sealed class RandomCorridorGeneratorEditor : Editor
         return generator.WallPrefabs != null && generator.WallPrefabs.Length > 0 &&
                generator.DoorFramePrefab != null &&
                generator.DoorPrefabs != null && generator.DoorPrefabs.Length > 0 &&
+               generator.CeilingPrefabs != null && generator.CeilingPrefabs.Length > 0 &&
+               generator.CeilingLightPrefab != null &&
                generator.FloorPrefabs != null && generator.FloorPrefabs.Any(floor => floor != null && !IsExcludedFloor(floor));
     }
 
@@ -89,17 +106,22 @@ public sealed class RandomCorridorGeneratorEditor : Editor
         var container = new GameObject(generator.GeneratedContainerName).transform;
         Undo.RegisterCreatedObjectUndo(container.gameObject, "Create random corridor");
         container.SetParent(generator.transform, false);
+        container.localPosition = new Vector3(0f, 0.1f, 0f);
         // Keep the complete generated Hall at a consistent gameplay scale.
         // Floors, walls, frames, and doors share this root so they scale together.
         container.localScale = Vector3.one * 1.7f;
 
         // The same random wall is used on both sides of a segment so the two
         // rows, and their door openings, remain aligned down the corridor.
-        var wallChoices = ChooseNonRepeatingWalls(generator.WallPrefabs, generator.SegmentCount);
+        var wallChoices = ChooseNonRepeatingWalls(generator.WallPrefabs, generator.SegmentObjectCount);
 
-        var corridorLength = GenerateWallRow(generator, container, "Left", -generator.CorridorWidth * .5f, generator.WallYaw, wallChoices);
+        var wallSpanEnds = new List<float>();
+        var corridorLength = GenerateWallRow(generator, container, "Left", -generator.CorridorWidth * .5f, generator.WallYaw, wallChoices, wallSpanEnds);
         // The right row is mirrored so its finished side faces into the corridor.
-        GenerateWallRow(generator, container, "Right", generator.CorridorWidth * .5f, generator.WallYaw + 180f, wallChoices);
+        GenerateWallRow(generator, container, "Right", generator.CorridorWidth * .5f, generator.WallYaw + 180f, wallChoices, null);
+
+        var corridorBounds = GetBoundsInParent(container.gameObject, container);
+        GenerateCeiling(generator, container, wallSpanEnds, corridorBounds.max.y);
 
         var availableFloors = generator.FloorPrefabs == null
             ? Array.Empty<GameObject>()
@@ -108,22 +130,115 @@ public sealed class RandomCorridorGeneratorEditor : Editor
             GenerateFloor(generator, container, corridorLength, availableFloors);
     }
 
-    private static float GenerateWallRow(RandomCorridorGenerator generator, Transform parent, string side, float x, float yaw, GameObject[] wallChoices)
+    private static float GenerateWallRow(RandomCorridorGenerator generator, Transform parent, string side, float x, float yaw, GameObject[] wallChoices, List<float> wallSpanEnds)
     {
         var cursor = 0f;
 
         for (var segment = 0; segment < wallChoices.Length; segment++)
         {
-            cursor = CreateWall(generator, parent, segment, side, x, yaw, cursor, wallChoices[segment]);
+            var isLastWall = segment == wallChoices.Length - 1;
+            var fractionalPart = generator.SegmentCount - Mathf.Floor(generator.SegmentCount);
+            var lengthScale = isLastWall && fractionalPart > 0.0001f ? fractionalPart : 1f;
+            cursor = CreateWall(generator, parent, segment, side, x, yaw, cursor, wallChoices[segment], lengthScale);
 
             // The last wall has no following wall, so it does not receive an
             // unnecessary door opening after it.
             var hasNextWall = segment < wallChoices.Length - 1;
             if (hasNextWall && (segment + 1) % generator.SegmentsPerDoor == 0)
                 cursor = CreateDoorSet(generator, parent, side, x, yaw, cursor, segment + 1);
+
+            wallSpanEnds?.Add(cursor);
         }
 
         return cursor;
+    }
+
+    private static void GenerateCeiling(RandomCorridorGenerator generator, Transform parent, List<float> wallSpanEnds, float wallTop)
+    {
+        if (wallSpanEnds.Count == 0)
+            return;
+
+        var wallIndex = 0;
+        var start = 0f;
+        var ceilingIndex = 1;
+        GameObject previousPrefab = null;
+
+        while (wallIndex < wallSpanEnds.Count)
+        {
+            var remaining = wallSpanEnds.Count - wallIndex;
+            // These choices never leave a one-wall remainder, so every
+            // generated ceiling always spans exactly two or three walls.
+            var wallCount = remaining == 2 || remaining == 4 ? 2 :
+                remaining == 3 ? 3 : UnityEngine.Random.Range(2, 4);
+
+            var end = wallSpanEnds[wallIndex + wallCount - 1];
+            var prefab = ChooseDifferentPrefab(generator.CeilingPrefabs, previousPrefab);
+            previousPrefab = prefab;
+            CreateCeilingTile(generator, parent, prefab, ceilingIndex++, wallCount, start, end, wallTop);
+
+            start = end;
+            wallIndex += wallCount;
+        }
+    }
+
+    private static void CreateCeilingTile(RandomCorridorGenerator generator, Transform parent, GameObject prefab, int index, int wallCount, float start, float end, float wallTop)
+    {
+        var ceiling = Instantiate(prefab, parent);
+        Undo.RegisterCreatedObjectUndo(ceiling, "Create corridor ceiling");
+        ceiling.name = $"Ceiling {index:00} - {wallCount} Walls ({prefab.name})";
+        ceiling.transform.localRotation = Quaternion.Euler(0f, generator.CeilingYaw, 0f);
+
+        var bounds = GetBoundsInParent(ceiling, parent);
+        var targetLength = Mathf.Max(0.01f, end - start);
+        ceiling.transform.localScale = new Vector3(
+            ceiling.transform.localScale.x * generator.CorridorWidth / Mathf.Max(0.01f, bounds.size.x),
+            ceiling.transform.localScale.y,
+            ceiling.transform.localScale.z * targetLength / Mathf.Max(0.01f, bounds.size.z));
+        bounds = GetBoundsInParent(ceiling, parent);
+        ceiling.transform.localPosition += new Vector3(
+            -bounds.center.x,
+            wallTop + generator.CeilingHeightOffset - bounds.min.y,
+            start - bounds.min.z);
+        AddMeshColliders(ceiling, generator.AddMeshColliders);
+
+        bounds = GetBoundsInParent(ceiling, parent);
+        CreateCeilingLight(generator, parent, index, bounds);
+    }
+
+    private static void CreateCeilingLight(RandomCorridorGenerator generator, Transform parent, int index, Bounds ceilingBounds)
+    {
+        var fixture = Instantiate(generator.CeilingLightPrefab, parent);
+        Undo.RegisterCreatedObjectUndo(fixture, "Create ceiling light fixture");
+        fixture.name = $"Ceiling Light {index:00} ({generator.CeilingLightPrefab.name})";
+        fixture.transform.localRotation = Quaternion.Euler(0f, generator.CeilingLightYaw, 0f);
+        fixture.transform.localScale = Vector3.one * generator.CeilingLightScale;
+
+        // Centre the fixture under the panel and touch its topmost mesh point
+        // to the corridor-facing (bottom) surface of the ceiling.
+        var fixtureBounds = GetBoundsInParent(fixture, parent);
+        fixture.transform.localPosition += new Vector3(
+            ceilingBounds.center.x - fixtureBounds.center.x,
+            ceilingBounds.min.y - fixtureBounds.max.y,
+            ceilingBounds.center.z - fixtureBounds.center.z);
+
+        var placedBounds = GetBoundsInParent(fixture, parent);
+        var lightObject = new GameObject("Corridor Point Light");
+        Undo.RegisterCreatedObjectUndo(lightObject, "Create corridor point light");
+        lightObject.transform.SetParent(fixture.transform, true);
+        lightObject.transform.position = parent.TransformPoint(new Vector3(
+            placedBounds.center.x,
+            placedBounds.min.y,
+            placedBounds.center.z));
+
+        var pointLight = Undo.AddComponent<Light>(lightObject);
+        pointLight.type = LightType.Point;
+        pointLight.color = generator.CeilingLightColor;
+        pointLight.intensity = generator.CeilingLightIntensity;
+        pointLight.range = generator.CeilingLightRange;
+        pointLight.shadows = LightShadows.Soft;
+        pointLight.renderMode = LightRenderMode.Auto;
+
+        AddMeshColliders(fixture, generator.AddMeshColliders);
     }
 
     private static void GenerateFloor(RandomCorridorGenerator generator, Transform parent, float corridorLength, GameObject[] floorPrefabs)
@@ -225,16 +340,30 @@ public sealed class RandomCorridorGeneratorEditor : Editor
         return AssetDatabase.GetAssetPath(floor).Replace('\\', '/') == ExcludedFloorPath;
     }
 
-    private static float CreateWall(RandomCorridorGenerator generator, Transform parent, int segment, string side, float x, float yaw, float cursor, GameObject prefab)
+    private static float CreateWall(RandomCorridorGenerator generator, Transform parent, int segment, string side, float x, float yaw, float cursor, GameObject prefab, float lengthScale)
     {
         var wall = Instantiate(prefab, parent);
         Undo.RegisterCreatedObjectUndo(wall, "Create corridor wall");
         wall.name = $"Wall {segment + 1:00} {side} ({prefab.name})";
         wall.transform.localRotation = Quaternion.Euler(0f, yaw, 0f);
+        ScaleAlongCorridor(wall.transform, lengthScale);
         var bounds = GetBoundsInParent(wall, parent);
         wall.transform.localPosition = new Vector3(x, -bounds.min.y, cursor - bounds.min.z);
         AddMeshColliders(wall, generator.AddMeshColliders);
         return cursor + Mathf.Max(0.01f, bounds.size.z - generator.WallJoinOverlap);
+    }
+
+    private static void ScaleAlongCorridor(Transform wall, float lengthScale)
+    {
+        // Convert the corridor's forward axis into the rotated model's local
+        // space, then shorten whichever horizontal model axis runs lengthwise.
+        var localForward = Quaternion.Inverse(wall.localRotation) * Vector3.forward;
+        var scale = wall.localScale;
+        if (Mathf.Abs(localForward.x) >= Mathf.Abs(localForward.z))
+            scale.x *= lengthScale;
+        else
+            scale.z *= lengthScale;
+        wall.localScale = scale;
     }
 
     private static float CreateDoorSet(RandomCorridorGenerator generator, Transform parent, string side, float x, float yaw, float cursor, int afterWall)
