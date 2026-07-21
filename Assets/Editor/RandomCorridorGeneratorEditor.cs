@@ -9,6 +9,7 @@ public sealed class RandomCorridorGeneratorEditor : Editor
     private const string WallsPath = "Assets/3d_ai_assets/walls";
     private const string DoorsPath = "Assets/3d_ai_assets/doors";
     private const string FloorsPath = "Assets/3d_ai_assets/floors";
+    private const string ExcludedFloorPath = "Assets/3d_ai_assets/floors/floor1/floor01.obj";
     private const string DoorFramePath = "Assets/3d_ai_assets/doors/doorframe1/doorframe01.obj";
 
     [MenuItem("GameObject/3D Object/Random Corridor Generator", false, 10)]
@@ -58,7 +59,9 @@ public sealed class RandomCorridorGeneratorEditor : Editor
             .Where(asset => AssetDatabase.GetAssetPath(asset) != DoorFramePath)
             .ToArray();
         generator.DoorFramePrefab = AssetDatabase.LoadAssetAtPath<GameObject>(DoorFramePath);
-        generator.FloorPrefabs = FindModels(FloorsPath);
+        generator.FloorPrefabs = FindModels(FloorsPath)
+            .Where(floor => !IsExcludedFloor(floor))
+            .ToArray();
     }
 
     private static GameObject[] FindModels(string folder)
@@ -76,7 +79,7 @@ public sealed class RandomCorridorGeneratorEditor : Editor
         return generator.WallPrefabs != null && generator.WallPrefabs.Length > 0 &&
                generator.DoorFramePrefab != null &&
                generator.DoorPrefabs != null && generator.DoorPrefabs.Length > 0 &&
-               generator.FloorPrefabs != null && generator.FloorPrefabs.Length > 0;
+               generator.FloorPrefabs != null && generator.FloorPrefabs.Any(floor => floor != null && !IsExcludedFloor(floor));
     }
 
     private static void Generate(RandomCorridorGenerator generator)
@@ -86,9 +89,9 @@ public sealed class RandomCorridorGeneratorEditor : Editor
         var container = new GameObject(generator.GeneratedContainerName).transform;
         Undo.RegisterCreatedObjectUndo(container.gameObject, "Create random corridor");
         container.SetParent(generator.transform, false);
-        // Keep the generated Hall at its native size. A zero scale would hide
-        // it entirely, so the neutral Unity scale is (1, 1, 1).
-        container.localScale = Vector3.one;
+        // Keep the complete generated Hall at a consistent gameplay scale.
+        // Floors, walls, frames, and doors share this root so they scale together.
+        container.localScale = Vector3.one * 1.7f;
 
         // The same random wall is used on both sides of a segment so the two
         // rows, and their door openings, remain aligned down the corridor.
@@ -98,8 +101,11 @@ public sealed class RandomCorridorGeneratorEditor : Editor
         // The right row is mirrored so its finished side faces into the corridor.
         GenerateWallRow(generator, container, "Right", generator.CorridorWidth * .5f, generator.WallYaw + 180f, wallChoices);
 
-        if (generator.FloorPrefabs != null && generator.FloorPrefabs.Length > 0)
-            GenerateFloor(generator, container, corridorLength);
+        var availableFloors = generator.FloorPrefabs == null
+            ? Array.Empty<GameObject>()
+            : generator.FloorPrefabs.Where(floor => floor != null && !IsExcludedFloor(floor)).ToArray();
+        if (availableFloors.Length > 0)
+            GenerateFloor(generator, container, corridorLength, availableFloors);
     }
 
     private static float GenerateWallRow(RandomCorridorGenerator generator, Transform parent, string side, float x, float yaw, GameObject[] wallChoices)
@@ -120,37 +126,58 @@ public sealed class RandomCorridorGeneratorEditor : Editor
         return cursor;
     }
 
-    private static void GenerateFloor(RandomCorridorGenerator generator, Transform parent, float corridorLength)
+    private static void GenerateFloor(RandomCorridorGenerator generator, Transform parent, float corridorLength, GameObject[] floorPrefabs)
     {
         var cursor = 0f;
         var tileIndex = 1;
-        const int tilesAcross = 2;
+        GameObject previousPrefab = null;
+        const int tilesAcross = 1;
         var targetTileWidth = generator.CorridorWidth / tilesAcross;
 
         while (cursor < corridorLength)
         {
-            // One random floor model per row keeps the two crosswise tiles
-            // aligned while varying the floor down the corridor.
-            var prefab = generator.FloorPrefabs[UnityEngine.Random.Range(0, generator.FloorPrefabs.Length)];
-            var firstTile = CreateFloorTile(generator, parent, prefab, tileIndex++, 0, targetTileWidth, cursor);
-            CreateFloorTile(generator, parent, prefab, tileIndex++, 1, targetTileWidth, cursor);
-            cursor += firstTile;
+            // One random floor model per row keeps a single continuous floor
+            // strip along the corridor while varying the surface down its length.
+            var prefab = ChooseDifferentPrefab(floorPrefabs, previousPrefab);
+            previousPrefab = prefab;
+            var randomYaw = generator.FloorYaw + (UnityEngine.Random.Range(0, 2) * 180f);
+            var rowLength = 0f;
+            for (var column = 0; column < tilesAcross; column++)
+            {
+                var remainingLength = corridorLength - cursor;
+                var tileLength = CreateFloorTile(generator, parent, prefab, tileIndex++, column, targetTileWidth, cursor, randomYaw, remainingLength);
+                if (column == 0)
+                    rowLength = tileLength;
+            }
+
+            cursor += rowLength;
         }
     }
 
-    private static float CreateFloorTile(RandomCorridorGenerator generator, Transform parent, GameObject prefab, int index, int column, float targetWidth, float z)
+    private static float CreateFloorTile(RandomCorridorGenerator generator, Transform parent, GameObject prefab, int index, int column, float targetWidth, float z, float yaw, float maximumLength)
     {
         var tile = Instantiate(prefab, parent);
         Undo.RegisterCreatedObjectUndo(tile, "Create corridor floor tile");
         tile.name = $"Floor {index:00} ({prefab.name})";
-        // The imported floor assets lie in their XY plane.  Flip them so the
-        // underside faces up, then lay that face flat on the XZ ground.
-        tile.transform.localRotation = Quaternion.Euler(-90f, generator.FloorYaw, 0f);
+        // These floor models are already imported flat in this project. Keep
+        // their native pitch and only allow an optional horizontal yaw.
+        tile.transform.localRotation = Quaternion.Euler(0f, yaw, 0f);
 
         var bounds = GetBoundsInParent(tile, parent);
         var width = Mathf.Max(0.01f, bounds.size.x);
         tile.transform.localScale = new Vector3(targetWidth / width, 1f, 1f);
         bounds = GetBoundsInParent(tile, parent);
+
+        // Only the final row is shortened.  This makes the floor end exactly
+        // where the final generated wall ends, with neither an overhang nor a gap.
+        if (bounds.size.z > maximumLength)
+        {
+            tile.transform.localScale = new Vector3(
+                tile.transform.localScale.x,
+                tile.transform.localScale.y,
+                tile.transform.localScale.z * (maximumLength / bounds.size.z));
+            bounds = GetBoundsInParent(tile, parent);
+        }
 
         var xStart = -generator.CorridorWidth * .5f + column * targetWidth;
         // Keep the top of the tile exactly at ground level.  Its thickness is
@@ -160,7 +187,7 @@ public sealed class RandomCorridorGeneratorEditor : Editor
             generator.FloorHeight - bounds.max.y,
             z - bounds.min.z);
         AddMeshColliders(tile, generator.AddMeshColliders);
-        return Mathf.Max(0.01f, bounds.size.z - generator.WallJoinOverlap);
+        return Mathf.Max(0.01f, bounds.size.z);
     }
 
     private static GameObject[] ChooseNonRepeatingWalls(GameObject[] prefabs, int count)
@@ -182,6 +209,20 @@ public sealed class RandomCorridorGeneratorEditor : Editor
         }
 
         return choices;
+    }
+
+    private static GameObject ChooseDifferentPrefab(GameObject[] prefabs, GameObject previousPrefab)
+    {
+        if (prefabs.Length == 1 || previousPrefab == null)
+            return prefabs[UnityEngine.Random.Range(0, prefabs.Length)];
+
+        var candidates = prefabs.Where(prefab => prefab != previousPrefab).ToArray();
+        return candidates[UnityEngine.Random.Range(0, candidates.Length)];
+    }
+
+    private static bool IsExcludedFloor(GameObject floor)
+    {
+        return AssetDatabase.GetAssetPath(floor).Replace('\\', '/') == ExcludedFloorPath;
     }
 
     private static float CreateWall(RandomCorridorGenerator generator, Transform parent, int segment, string side, float x, float yaw, float cursor, GameObject prefab)
